@@ -9,6 +9,7 @@ lazy val root = (project in file("."))
       "org.typelevel" %% "cats-effect" % "3.3.14",
       "org.typelevel" %% "log4cats-slf4j" % "2.5.0",
       "dev.fpinbo" %% "jms4s-active-mq-artemis" % "0.2.1",   // TODO(AR) may need to create a provider for SQS
+      "com.fasterxml.uuid" % "java-uuid-generator" % "4.0.1",
 
       "org.apache.logging.log4j" % "log4j-slf4j-impl" % "2.19.0" % Runtime
     )
