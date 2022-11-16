@@ -39,7 +39,7 @@ class LocalMessageStore(folder: Path) {
       }
     }
 
-    newMessageFileId.flatMap { persistentMessageId: UUID =>
+    newMessageFileId().flatMap { persistentMessageId: UUID =>
       message.asTextF[IO].flatMap { messageText: String =>
         Resource.make(openNewMessageFile(persistentMessageId))(closeMessageFile).use { messageFile =>
           IO.blocking {
@@ -48,7 +48,7 @@ class LocalMessageStore(folder: Path) {
             persistentMessageId
           }
         }
-      }
+      }.flatTap(uuid => IO.delay {s"Persisted message: $uuid"})
     }
   }
 }

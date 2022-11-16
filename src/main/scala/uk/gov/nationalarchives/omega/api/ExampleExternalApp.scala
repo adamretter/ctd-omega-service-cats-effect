@@ -3,7 +3,7 @@ package uk.gov.nationalarchives.omega.api
 import cats.data.NonEmptyList
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import jms4s.JmsAcknowledgerConsumer.AckAction
-import jms4s.JmsClient
+import jms4s.{JmsAcknowledgerConsumer, JmsClient, JmsProducer}
 import jms4s.activemq.activeMQ
 import jms4s.activemq.activeMQ.{ClientId, Config, Endpoint, Password, Username}
 import jms4s.config.{DestinationName, QueueName}
@@ -11,7 +11,9 @@ import jms4s.jms.JmsMessage.JmsTextMessage
 import jms4s.jms.MessageFactory
 import org.typelevel.log4cats.{Logger, LoggerFactory, SelfAwareStructuredLogger}
 import org.typelevel.log4cats.slf4j.Slf4jFactory
+import uk.gov.nationalarchives.omega.api.ApiServiceApp.{createJmsClient, createJmsInputQueueConsumer, createJmsProducer, inputQueue}
 
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.duration.DurationInt
 
@@ -22,17 +24,17 @@ object ExampleExternalApp extends IOApp {
 
   val instanceId = new AtomicInteger() // TODO(AR) make this dynamic in future as we may have multiple instances for scalability
 
-  val jmsClient: Resource[IO, JmsClient[IO]] = jmsClientResource // see providers section!
+//  val jmsClient: Resource[IO, JmsClient[IO]] = jmsClientResource // see providers section!
   val omegaRequestQueue: QueueName = QueueName("OMEGA.INPUT.QUEUE")
   val omegaResponseQueue: QueueName = QueueName("OMEGA.OUTPUT.QUEUE")
 
-  private def jmsClientResource(implicit L: Logger[IO]): Resource[IO, JmsClient[IO]] =
+  private def createJmsClient()(implicit L: Logger[IO]): Resource[IO, JmsClient[IO]] =
     activeMQ.makeJmsClient[IO](
       Config(
         endpoints = NonEmptyList.one(Endpoint("localhost", 61616)),
         username = Some(Username("admin")),
         password = Some(Password("admin")),
-        clientId = ClientId("omega.example-external-app.instance-" + instanceId.incrementAndGet())  // TODO(AR) at the moment this app will create two JMS clients due to how the IO's are composed - we should only create one!
+        clientId = ClientId("omega.example-external-app.instance-" + UUID.randomUUID().toString)
       )
     )
 
@@ -54,44 +56,29 @@ object ExampleExternalApp extends IOApp {
 
     // TODO(AR) how to produce 10 requests, await 10 responses and then shutdown? -- start with any responses and then consider also adding in CorrelationID
 
-    // producer
-    val producerRes = for {
-      client <- jmsClient
-      producer <- client.createProducer(10)
-    } yield producer
+    val jmsIo: Resource[IO, (JmsProducer[IO], JmsAcknowledgerConsumer[IO])] = for {
+      jmsClient <- createJmsClient()
+      jmsProducerAndConsumer <- Resource.both(
+        jmsClient.createProducer(10),
+        jmsClient.createAcknowledgerConsumer(omegaResponseQueue, 10, 100.millis)
+      )
+    } yield jmsProducerAndConsumer
 
     val messageStrings: NonEmptyList[String] = NonEmptyList.fromListUnsafe((1 to 10).map(i => s"Message '$i'").toList)
 
-    val producerIO: IO[ExitCode] = producerRes.use { producer => {
-          producer.sendN(makeN(messageStrings, omegaRequestQueue))
-      }.as(ExitCode.Success)
-    }
+    jmsIo.use { case (jmsProducer, jmsConsumer) =>
+      IO.both(
+        // producer action
+        jmsProducer.sendN(makeN(messageStrings, omegaRequestQueue)),
 
-
-    // consumerIO
-    val consumerRes = for {
-      client <- jmsClient
-      consumer <- client.createAcknowledgerConsumer(omegaResponseQueue, 10, 100.millis)
-    } yield consumer
-
-    val consumerIO : IO[ExitCode] = consumerRes.use(_.handle { (jmsMessage, mf) =>
-      for {
-        text <- jmsMessage.asTextF[IO]
-        res <- printResponse(text, mf)
-      } yield res
-    }.as(ExitCode.Success))
-
-    IO.both(producerIO, consumerIO)
-      .map { case (producerExitCode, consumerExitCode) =>
-          if (producerExitCode == consumerExitCode) {
-            producerExitCode
-          } else if (producerExitCode == 0) {
-            consumerExitCode
-          } else if (consumerExitCode == 0) {
-            producerExitCode
-          } else {
-            producerExitCode
-          }
-      }
+        // consumer action
+        jmsConsumer.handle { case (jmsMessage, mf) =>
+            for {
+              text <- jmsMessage.asTextF[IO]
+              res <- printResponse(text, mf)
+            } yield res
+        }
+      )
+    }.as(ExitCode.Success)
   }
 }
